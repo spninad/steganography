@@ -23,14 +23,18 @@ Usage:
 
 import marimo
 
-__generated_with = "0.10.0"
+__generated_with = "0.18.4"
 app = marimo.App(width="medium")
 
 
 @app.cell
 def _():
     import marimo as mo
+    return (mo,)
 
+
+@app.cell
+def _(mo):
     mo.md(r"""
     # Rollout Generation for Canary Detection
 
@@ -50,7 +54,7 @@ def _():
     | CoT Monitored | Yes/No | Tells model its reasoning is being watched |
     | Canary Important | Yes/No | Marks canary as useful for future steps |
     """)
-    return (mo,)
+    return
 
 
 @app.cell
@@ -68,9 +72,13 @@ def _():
     from pathlib import Path
     from typing import Any, Optional
 
+    import nest_asyncio
     import pandas as pd
     from openai import AsyncOpenAI
     from tqdm.asyncio import tqdm_asyncio
+
+    # Allow nested event loops for Marimo
+    nest_asyncio.apply()
 
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -86,12 +94,9 @@ def _():
         dataclass,
         datetime,
         field,
-        json,
         logger,
-        logging,
         os,
         pd,
-        random,
         time,
         timezone,
         tqdm_asyncio,
@@ -114,7 +119,7 @@ def _(Enum):
 
 
 @app.cell
-def _(dataclass, field, RolloutType):
+def _(RolloutType, dataclass, field):
     @dataclass
     class RolloutConfig:
         """Configuration for a single rollout."""
@@ -159,7 +164,7 @@ def _(dataclass, field, RolloutType):
 
 
 @app.cell
-def _(time, asyncio):
+def _(asyncio, time):
     class RateLimiter:
         """Token bucket rate limiter for API requests."""
 
@@ -340,7 +345,7 @@ def _(
         ) -> list[list[dict[str, str]] | dict[str, str]]:
             """
             Build message sequences for a rollout.
-            
+
             Returns a list of conversation states, where each state is a list of messages.
             For SECRET_INJECT_REMOVE, returns:
             - State 1: [system, user_phase1] -> get response1
@@ -379,7 +384,7 @@ def _(
 
 
 @app.cell
-def _(dataclass, Optional):
+def _(Optional, dataclass):
     @dataclass
     class RolloutResult:
         """Result of a single rollout."""
@@ -721,12 +726,7 @@ def _(mo):
     test_canary_important = mo.ui.checkbox(
         value=True, label="Test Canary Importance (Yes/No)"
     )
-    return (
-        rollout_type_options,
-        rollout_type_select,
-        test_canary_important,
-        test_cot_monitored,
-    )
+    return rollout_type_select, test_canary_important, test_cot_monitored
 
 
 @app.cell
@@ -766,7 +766,7 @@ def _(Path, max_puzzles_input, mo, pd, puzzles_path_input):
 
     if puzzles_load_error:
         mo.md(f"⚠️ {puzzles_load_error}")
-    return puzzles_df, puzzles_load_error, puzzles_path
+    return (puzzles_df,)
 
 
 @app.cell
@@ -849,20 +849,7 @@ def _(
                 )
     elif puzzles_df is None:
         mo.md("⚠️ Please load puzzles first.")
-    return (
-        api_key,
-        config,
-        cot_conditions,
-        elapsed,
-        generated_rollouts_df,
-        generator,
-        importance_conditions,
-        output_path,
-        puzzles_list,
-        selected_types,
-        start_time,
-        type_map,
-    )
+    return (generated_rollouts_df,)
 
 
 @app.cell
@@ -876,7 +863,7 @@ def _(mo):
 
 
 @app.cell
-def _(generated_rollouts_df, mo, pd, Path, output_path_input):
+def _(Path, generated_rollouts_df, mo, output_path_input, pd):
     # Display results
     display_df = generated_rollouts_df
     if display_df is None:
@@ -898,7 +885,7 @@ def _(generated_rollouts_df, mo, pd, Path, output_path_input):
         mo.ui.table(summary_stats)
     else:
         mo.md("No rollouts available. Generate rollouts first.")
-    return display_df, existing_path, summary_stats
+    return (display_df,)
 
 
 @app.cell
@@ -915,7 +902,7 @@ def _(display_df, mo):
         ]
         available_sample_cols = [c for c in sample_cols if c in display_df.columns]
         mo.ui.table(display_df[available_sample_cols].head(20))
-    return available_sample_cols, sample_cols
+    return
 
 
 @app.cell
@@ -996,27 +983,11 @@ def _(display_df, mo, pd, puzzles_df, re, run_detection_button):
     | Canary Detected | {detected_count} |
     | Detection Rate | {rate:.1%} |
     """)
-    return (
-        detected,
-        detected_count,
-        detection_records,
-        detection_results_df,
-        match,
-        match_found,
-        output,
-        pattern,
-        pattern_map,
-        pid,
-        puzzle_row,
-        rate,
-        regex,
-        rollout_row,
-        total,
-    )
+    return (detection_results_df,)
 
 
 @app.cell
-def _(detection_results_df, mo, pd):
+def _(detection_results_df, mo):
     if detection_results_df is not None:
         # Breakdown by condition
         breakdown = detection_results_df.groupby(
@@ -1030,7 +1001,7 @@ def _(detection_results_df, mo, pd):
 
         mo.md("### Detection Rate by Condition")
         mo.ui.table(breakdown)
-    return (breakdown,)
+    return
 
 
 if __name__ == "__main__":
