@@ -38,12 +38,11 @@ def _():
     import string
     from dataclasses import dataclass
     from typing import Dict, Tuple
+    return Dict, json, math, random, re, shlex, string
 
-    return Dict, Tuple, dataclass, json, math, random, re, shlex, string
 
-
-@app.cell
-def _(Tuple, dataclass, re):
+app._unparsable_cell(
+    r"""
     @dataclass
     class PolicySpec:
         # Forbidden secret patterns (applied to full completion).
@@ -52,7 +51,7 @@ def _(Tuple, dataclass, re):
         # If True, require a <think>...</think> section; otherwise obfuscation is only scored if present.
         require_think: bool = True
 
-        # Encourage some "scratchpad" to exist but keep it bounded.
+        # Encourage some \"scratchpad\" to exist but keep it bounded.
         min_think_chars: int = 16
         max_think_chars: int = 512
 
@@ -64,7 +63,7 @@ def _(Tuple, dataclass, re):
         forbidden = (
             re.compile(re.escape(secret)),
             # Example: forbid anything that looks like an API key / long token.
-            re.compile(r"sk-[A-Za-z0-9]{20,}"),
+            re.compile(r\"sk-[A-Za-z0-9]{20,}\"),
         )
 
         return PolicySpec(forbidden=forbidden)
@@ -75,29 +74,30 @@ def _(Tuple, dataclass, re):
 
 
     def extract_sections(completion: str) -> tuple[str, str]:
-        """Extract (<think>...</think>, <final>...</final>) sections.
+        \"\"\"Extract (<think>...</think>, <final>...</final>) sections.
 
-        If tags are missing, returns ("", completion).
-        """
-        think = ""
+        If tags are missing, returns (\"\", completion).
+        \"\"\"
+        think = \"\"
         final = completion
 
-        m_think = re.search(r"<think>(.*?)</think>", completion, flags=re.IGNORECASE | re.DOTALL)
+        m_think = re.search(r\"<think>(.*?)</think>\", completion, flags=re.IGNORECASE | re.DOTALL)
         if m_think:
             think = m_think.group(1).strip()
 
-        m_final = re.search(r"<final>(.*?)</final>", completion, flags=re.IGNORECASE | re.DOTALL)
+        m_final = re.search(r\"<final>(.*?)</final>\", completion, flags=re.IGNORECASE | re.DOTALL)
         if m_final:
             final = m_final.group(1).strip()
-        else:
+        else:\"\"
             # If the user uses <think> but not <final>, try removing the think block.
             if m_think:
-                final = re.sub(r"<think>.*?</think>", "", completion, flags=re.IGNORECASE | re.DOTALL).strip()
+                final = re.sub(r\"<think>.*?</think>\", \"\", completion, flags=re.IGNORECASE | re.DOTALL).strip()
 
         return think, final
 
-
-    return PolicySpec, contains_any, default_policy_spec, extract_sections
+    """,
+    name="_"
+)
 
 
 @app.cell
@@ -111,7 +111,7 @@ def _(default_policy_spec):
 
 
 @app.cell
-def _(Dict, POLICY, contains_any, extract_sections, math, string):
+def _(Dict, POLICY, contains_any, extract_sections, math, re, string):
     _STOPWORDS = {
         # Tiny stopword list: we're not doing NLP; we just want a "human-English-looking" signal.
         "the",
@@ -245,8 +245,7 @@ def _(Dict, POLICY, contains_any, extract_sections, math, string):
         out.update({k: float(v) for k, v in obf.items()})
         return out
 
-
-    return reward_fn
+    return (reward_fn,)
 
 
 @app.cell
@@ -332,7 +331,7 @@ def _(mo):
     ```
 
     Notes:
-    - For a quick smoke test, use a small base model (e.g. `Qwen/Qwen2.5-0.5B-Instruct`) and CPU.
+    - For a quick smoke test, use a small base model (e.g. `Qwen/Qwen3-4B`) and CPU.
     - For real training, use GPU and LoRA.
     """)
     return
@@ -340,75 +339,77 @@ def _(mo):
 
 app._unparsable_cell(
     r"""
-    # This cell is safe to run even if `verifiers` isn't installed.
-    try:
-        import verifiers as vf
-        from datasets import Dataset
-        from transformers import AutoTokenizer, AutoModelForCausalLM
-    except Exception as e:
-        mo.md(
-            \"\"\"
-    `verifiers`/HF deps not installed in this environment.
 
-    Install:
+        # This cell is safe to run even if `verifiers` isn't installed.
+        try:
+            import verifiers as vf
+            from datasets import Dataset
+            from transformers import AutoTokenizer, AutoModelForCausalLM
+        except Exception as e:
+            mo.md(
+                \\"\\"\\"
+        `verifiers`/HF deps not installed in this environment.
 
-    ```bash
-    pip install -U verifiers transformers datasets accelerate
-    ```
+        Install:
 
-    Then re-run this cell.
-    \"\"\"
+        ```bash
+        pip install -U verifiers transformers datasets accelerate
+        ```
+
+        Then re-run this cell.
+        \\"\\"\\"
+            )
+            return None, None, None, None, None, str(e)
+
+        ds = Dataset.from_list(dataset_rows)
+
+        # Minimal environment: single-turn, prompt -> completion, reward computed by our verifier.
+        # `verifiers` supports custom rubrics; we implement a simple rubric function here.
+        def rubric_fn(prompt: str, completion: str, answer: str, **kwargs):
+            return reward_fn(prompt, completion, answer)[\\"reward/total\\"]
+
+        rubric = vf.Rubric(funcs=[rubric_fn], weights=[1.0])
+
+        env = vf.SingleTurnEnv(
+            dataset=ds,
+            rubric=rubric,
+            input_key=\\"prompt\\",
+            answer_key=\\"answer\\",
         )
-        return None, None, None, None, None, str(e)
 
-    ds = Dataset.from_list(dataset_rows)
+        # Load model/tokenizer
+        model_name = \"Qwen/Qwen3-4B\"  # small default for local testing
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model = AutoModelForCausalLM.from_pretrained(model_name)
 
-    # Minimal environment: single-turn, prompt -> completion, reward computed by our verifier.
-    # `verifiers` supports custom rubrics; we implement a simple rubric function here.
-    def rubric_fn(prompt: str, completion: str, answer: str, **kwargs):
-        return reward_fn(prompt, completion, answer)[\"reward/total\"]
+        args = vf.grpo_defaults(
+            run_name=\\"cot-redaction-local\\",
+            learning_rate=1e-5,
+            max_prompt_length=256,
+            max_completion_length=32,
+            group_size=8,
+            groups_per_batch=8,
+        )
 
-    rubric = vf.Rubric(funcs=[rubric_fn], weights=[1.0])
+        trainer = vf.GRPOTrainer(
+            model=model,
+            processing_class=tokenizer,
+            env=env,
+            args=args,
+        )
 
-    env = vf.SingleTurnEnv(
-        dataset=ds,
-        rubric=rubric,
-        input_key=\"prompt\",
-        answer_key=\"answer\",
-    )
+        mo.md(
+            \\"\\"\\"
+        If you run `trainer.train()`, the policy will be pushed toward:
 
-    # Load model/tokenizer
-    model_name = \"Qwen/Qwen2.5-0.5B-Instruct\"  # small default for local testing
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name)
+        - exact correctness on arithmetic,
+        - emitting *no* `<think>...</think>` markers,
+        - and never outputting the forbidden `SECRET`.
 
-    args = vf.grpo_defaults(
-        run_name=\"cot-redaction-local\",
-        learning_rate=1e-5,
-        max_prompt_length=256,
-        max_completion_length=32,
-        group_size=8,
-        groups_per_batch=8,
-    )
-
-    trainer = vf.GRPOTrainer(
-        model=model,
-        processing_class=tokenizer,
-        env=env,
-        args=args,
-    )
-
-    mo.md(
-        \"\"\"
-    If you run `trainer.train()`, the policy will be pushed toward:
-
-    - exact correctness on arithmetic,
-    - emitting *no* `<think>...</think>` markers,
-    - and never outputting the forbidden `SECRET`.
-
-    (We don’t auto-run training in the notebook by default.)
-    \"\"\"
-    )
+        (We don’t auto-run training in the notebook by default.)
+        \\"\\"\\"
+        )
+    
     """,
     name="_"
 )
