@@ -132,7 +132,7 @@ def _(RolloutType, dataclass, field):
         canary_marked_important: bool = False  # Is canary marked as important?
 
         # Model settings
-        model: str = "Qwen/Qwen3-235B-A22B"
+        model: str = "Qwen/Qwen3-Next-80B-A3B-Thinking"
         temperature: float = 0.7
         max_tokens: int = 4096
 
@@ -142,7 +142,7 @@ def _(RolloutType, dataclass, field):
 
         api_key: str
         base_url: str = "https://api.together.xyz/v1"
-        model: str = "Qwen/Qwen3-235B-A22B"
+        model: str = ""
 
         # Generation settings
         temperature: float = 0.7
@@ -659,7 +659,7 @@ def _(mo):
         label="Output file path",
     )
     model_input = mo.ui.text(
-        value="Qwen/Qwen3-235B-A22B",
+        value="Qwen/Qwen3-Next-80B-A3B-Thinking",
         label="Model",
     )
     temperature_input = mo.ui.slider(
@@ -717,7 +717,7 @@ def _(mo):
     }
     rollout_type_select = mo.ui.multiselect(
         options=rollout_type_options,
-        value=["secret_inject_remove"],
+        value=["Secret Inject → Remove"],
         label="Rollout Types",
     )
 

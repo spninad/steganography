@@ -12,7 +12,7 @@ Usage:
 
 import marimo
 
-__generated_with = "0.10.0"
+__generated_with = "0.18.4"
 app = marimo.App(width="medium")
 
 
@@ -62,19 +62,13 @@ def _():
         create_detector_from_puzzle,
     )
     return (
-        BatchEvaluationSummary,
         CanaryDetector,
         Path,
         RolloutEvaluationResult,
         RolloutEvaluator,
         compute_batch_summary,
-        create_detector_from_puzzle,
-        dataclass,
-        defaultdict,
         json,
         pd,
-        re,
-        Optional,
     )
 
 
@@ -143,22 +137,14 @@ def _(Path, json, mo, pd, puzzles_path_input, rollouts_path_input):
         # Try to load patterns from JSON
         patterns_path = puzzles_path.with_suffix(".json").with_stem("canary_patterns")
         if patterns_path.exists():
-            with open(patterns_path) as f:
-                patterns_data = json.load(f)
+            with open(patterns_path) as patterns_file:
+                patterns_data = json.load(patterns_file)
             puzzles_df = pd.DataFrame(patterns_data)
             mo.md(f"✅ Loaded {len(puzzles_df)} patterns from `{patterns_path}`")
 
     if load_error:
         mo.md(f"⚠️ {load_error}")
-    return (
-        load_error,
-        patterns_data,
-        patterns_path,
-        puzzles_df,
-        puzzles_path,
-        rollouts_df,
-        rollouts_path,
-    )
+    return puzzles_df, rollouts_df
 
 
 @app.cell
@@ -172,7 +158,7 @@ def _(mo):
 
 
 @app.cell
-def _(RolloutEvaluator, create_detector_from_puzzle, puzzles_df):
+def _(RolloutEvaluator, puzzles_df):
     # Create evaluator with detectors for each puzzle
     evaluator = RolloutEvaluator()
 
@@ -182,12 +168,14 @@ def _(RolloutEvaluator, create_detector_from_puzzle, puzzles_df):
             evaluator.add_detector_from_puzzle(puzzle_data)
 
     detector_count = len(evaluator.detectors)
-    return detector_count, evaluator, puzzle_data, puzzle_row
+    return detector_count, evaluator
 
 
 @app.cell
 def _(detector_count, mo):
-    mo.md(f"**Configured {detector_count} canary detectors**")
+    mo.md(f"""
+    **Configured {detector_count} canary detectors**
+    """)
     return
 
 
@@ -202,26 +190,17 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
-    run_eval_button = mo.ui.run_button(label="Run Evaluation")
-    run_eval_button
-    return (run_eval_button,)
-
-
-@app.cell
 def _(
     RolloutEvaluationResult,
     compute_batch_summary,
     evaluator,
     mo,
-    pd,
     rollouts_df,
-    run_eval_button,
 ):
     evaluation_results: list[RolloutEvaluationResult] = []
     evaluation_summary = None
 
-    if run_eval_button.value and rollouts_df is not None:
+    if rollouts_df is not None and len(evaluator.detectors) > 0:
         # Convert rollouts to expected format
         rollouts_list = []
         for idx, row in rollouts_df.iterrows():
@@ -248,7 +227,9 @@ def _(
         mo.md(f"✅ Evaluated {len(evaluation_results)} rollouts")
     elif rollouts_df is None:
         mo.md("⚠️ No rollouts loaded. Please load rollouts data first.")
-    return evaluation_results, evaluation_summary, idx, rollouts_list, row
+    else:
+        mo.md("⚠️ No detectors configured. Please load puzzles data first.")
+    return evaluation_results, evaluation_summary
 
 
 @app.cell
@@ -295,7 +276,7 @@ def _(evaluation_summary, mo, pd):
         type_df = pd.DataFrame(type_data)
         mo.md("### Results by Canary Type")
         mo.ui.table(type_df)
-    return ctype, stats, type_data, type_df
+    return
 
 
 @app.cell
@@ -315,7 +296,7 @@ def _(evaluation_summary, mo, pd):
         cond_df = pd.DataFrame(cond_data)
         mo.md("### Results by Experimental Condition")
         mo.ui.table(cond_df)
-    return cond, cond_data, cond_df, cstats
+    return
 
 
 @app.cell
@@ -329,7 +310,7 @@ def _(mo):
 
 
 @app.cell
-def _(evaluation_results, mo, pd):
+def _(evaluation_results: "list[RolloutEvaluationResult]", mo, pd):
     if evaluation_results:
         # Convert to DataFrame for display
         results_data = [r.to_dict() for r in evaluation_results]
@@ -352,7 +333,7 @@ def _(evaluation_results, mo, pd):
         mo.ui.table(display_df.head(50))
     else:
         mo.md("No evaluation results yet. Run evaluation first.")
-    return available_cols, display_cols, display_df, results_data, results_df
+    return
 
 
 @app.cell
@@ -394,7 +375,7 @@ def _(evaluation_summary):
             )
 
         plt.tight_layout()
-    return ax_type, bar, bars, fig_type, plt, rate, rates, types
+    return fig_type, plt
 
 
 @app.cell
@@ -430,7 +411,7 @@ def _(evaluation_summary, plt):
             )
 
         plt.tight_layout()
-    return ax_cond, bar_c, bars_cond, cond_rates, conditions, fig_cond, rate_c
+    return (fig_cond,)
 
 
 @app.cell
@@ -452,7 +433,11 @@ def _(mo):
 
 
 @app.cell
-def _(evaluation_results, evaluation_summary, mo):
+def _(
+    evaluation_results: "list[RolloutEvaluationResult]",
+    evaluation_summary,
+    mo,
+):
     from scipy import stats as scipy_stats
 
     if evaluation_results and len(evaluation_summary.by_condition) >= 2:
@@ -484,20 +469,7 @@ def _(evaluation_results, evaluation_summary, mo):
     """)
     else:
         mo.md("Need at least 2 conditions with results to perform statistical analysis.")
-    return (
-        chi2,
-        cond_name,
-        cond_stats,
-        conditions_list,
-        detected,
-        dof,
-        expected,
-        not_detected,
-        observed,
-        p_value,
-        scipy_stats,
-        significance,
-    )
+    return
 
 
 @app.cell
@@ -523,13 +495,13 @@ def _(mo):
 
 @app.cell
 def _(
-    evaluation_results,
+    Path,
+    evaluation_results: "list[RolloutEvaluationResult]",
     evaluation_summary,
     export_button,
     export_path_input,
     json,
     mo,
-    Path,
     pd,
 ):
     if export_button.value and evaluation_results:
@@ -544,8 +516,8 @@ def _(
         # Export summary as JSON
         if evaluation_summary is not None:
             summary_path = export_base.with_name(f"{export_base.name}_summary.json")
-            with open(summary_path, "w") as f:
-                json.dump(evaluation_summary.to_dict(), f, indent=2)
+            with open(summary_path, "w") as summary_file:
+                json.dump(evaluation_summary.to_dict(), summary_file, indent=2)
 
         mo.md(f"""
     ✅ **Exported results:**
@@ -554,14 +526,7 @@ def _(
     """)
     elif export_button.value:
         mo.md("⚠️ No results to export. Run evaluation first.")
-    return (
-        export_base,
-        f,
-        parquet_path,
-        results_export,
-        results_export_df,
-        summary_path,
-    )
+    return
 
 
 @app.cell
@@ -590,13 +555,7 @@ def _(mo):
 
 
 @app.cell
-def _(
-    CanaryDetector,
-    mo,
-    test_button,
-    test_pattern_input,
-    test_text_input,
-):
+def _(CanaryDetector, mo, test_button, test_pattern_input, test_text_input):
     if test_button.value:
         try:
             test_detector = CanaryDetector(
@@ -615,7 +574,7 @@ def _(
                 mo.md("❌ **Canary NOT detected** in the text.")
         except Exception as e:
             mo.md(f"⚠️ Error: {e}")
-    return test_detector, test_result
+    return
 
 
 if __name__ == "__main__":
