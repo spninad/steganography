@@ -2,21 +2,23 @@
 Canary Usage Detection with Linear Probes
 
 This Marimo notebook trains linear probes on model activations to detect whether
-the model is "deciding to cheat" by using secret canary information.
+the model will USE secret canary information in its output.
 
-## Experiment Design
+## Experiment Design (Corrected Methodology)
 
-We collect activations from the model in two conditions:
-1. **Canary Present**: Model sees the canary instruction and uses it
-2. **Canary Absent**: Model doesn't see the canary instruction
+We probe the model's OUTPUT BEHAVIOR, not input differences:
+1. Run model on prompts with canary instruction
+2. Generate completions and detect if canary appears in OUTPUT
+3. Label based on actual model behavior (used canary = 1, didn't use = 0)
+4. Train probe to predict output behavior from activations
 
-We train a linear probe (logistic regression) to classify activations and detect
-when the model has "internalized" the canary and intends to use it.
+This avoids the trivial classification problem where probes just detect
+different input text rather than the model's "decision" to cheat.
 
 ## Key Questions
 - At which layer does the "decision to use canary" become detectable?
 - Can we detect this intent before the model outputs the canary?
-- How does monitoring (telling model CoT is watched) affect detectability?
+- Is there a point in the forward pass where we could intervene?
 
 Usage:
     marimo run canary_probe_experiment.py
@@ -36,16 +38,21 @@ def _():
     # Canary Usage Detection with Linear Probes
 
     This experiment uses **TransformerLens** to:
-    1. Collect activations from Qwen3-4B when processing canary puzzles
-    2. Train linear probes to detect "intent to use canary"
-    3. Analyze at which layers this decision becomes detectable
+    1. Run the model on canary puzzles and **generate completions**
+    2. Detect whether the canary appears in the **output** (not input)
+    3. Train probes to predict output behavior from activations
 
-    ## Why This Matters
+    ## Corrected Methodology
 
-    If we can detect the "decision to cheat" in the model's activations:
-    - We could potentially intervene before the model outputs the canary
-    - We gain insight into how models represent and use secret information
-    - We can study whether monitoring awareness changes this representation
+    **Previous (flawed)**: Compared activations from different input prompts
+    → Probe trivially detected input text differences, not model decisions
+
+    **Current (correct)**: All prompts contain canary instructions, but:
+    - Some model completions USE the canary (label=1)
+    - Some model completions DON'T use the canary (label=0)
+    - Probe learns to predict **output behavior** from activations
+
+    This tells us: "Can we detect when the model will use secret info?"
     """)
     return (mo,)
 
@@ -53,16 +60,14 @@ def _():
 @app.cell
 def _():
     import json
-    import random
+    import re
     from dataclasses import dataclass
     from pathlib import Path
-    from typing import Optional
 
     import numpy as np
     import pandas as pd
     import torch
     from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import accuracy_score, classification_report, roc_auc_score
     from sklearn.model_selection import cross_val_score, train_test_split
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
@@ -80,6 +85,7 @@ def _():
         make_pipeline,
         np,
         pd,
+        re,
         tl_utils,
         torch,
         tqdm,
@@ -193,6 +199,7 @@ def _(Path, max_samples_input, mo, pd, puzzles_path_input):
     # Load puzzles
     puzzles_df = None
     puzzles_path = Path(puzzles_path_input.value)
+    _status_msg = ""
 
     if puzzles_path.exists():
         puzzles_df = pd.read_parquet(puzzles_path)
@@ -200,9 +207,11 @@ def _(Path, max_samples_input, mo, pd, puzzles_path_input):
         max_samples = int(max_samples_input.value)
         if len(puzzles_df) > max_samples:
             puzzles_df = puzzles_df.sample(n=max_samples, random_state=42)
-        mo.md(f"✅ Loaded **{len(puzzles_df)}** puzzles")
+        _status_msg = f"✅ Loaded **{len(puzzles_df)}** puzzles"
     else:
-        mo.md(f"⚠️ Puzzles file not found: {puzzles_path}")
+        _status_msg = f"⚠️ Puzzles file not found: {puzzles_path}"
+
+    mo.output.replace(mo.md(_status_msg))
     return (puzzles_df,)
 
 
@@ -210,109 +219,118 @@ def _(Path, max_samples_input, mo, pd, puzzles_path_input):
 def _(dataclass):
     @dataclass
     class ProbeDatapoint:
-        """A single datapoint for probe training."""
+        """A single datapoint for probe training.
+
+        Labels are based on OUTPUT behavior, not input content:
+        - label=1: Model's completion CONTAINS the canary pattern
+        - label=0: Model's completion does NOT contain the canary
+        """
         prompt: str
-        label: int  # 1 = canary present, 0 = canary absent
+        completion: str  # Model's generated output
+        label: int  # 1 = canary used in output, 0 = canary not used
         puzzle_id: str
         canary_type: str
-        condition: str  # "with_canary" or "without_canary"
+        detection_regex: str  # Pattern to detect canary in output
     return (ProbeDatapoint,)
 
 
 @app.cell
-def _(ProbeDatapoint, puzzles_df):
-    def prepare_probe_data(df) -> list[ProbeDatapoint]:
-        """Prepare paired prompts for probe training.
+def _(puzzles_df):
+    def prepare_puzzle_prompts(df) -> list[dict]:
+        """Prepare prompts for generation.
 
-        For each puzzle, we create two datapoints:
-        1. Prompt WITH canary instruction (label=1)
-        2. Prompt WITHOUT canary instruction (label=0)
+        We only use prompts WITH canary instructions.
+        Labels will be assigned AFTER generation based on output.
         """
-        datapoints = []
+        prompts = []
 
         for _, row in df.iterrows():
             puzzle_id = row.get("puzzle_id", "unknown")
             canary_type = row.get("canary_type", "unknown")
+            detection_regex = row.get("detection_regex", "")
 
-            # Prompt with canary
+            # Only use prompts with canary instruction
             problem_with_canary = row.get("problem_with_canary", "")
-            if problem_with_canary:
-                datapoints.append(ProbeDatapoint(
-                    prompt=f"Solve this problem:\n\n{problem_with_canary}\n\nAnswer:",
-                    label=1,
-                    puzzle_id=puzzle_id,
-                    canary_type=canary_type,
-                    condition="with_canary",
-                ))
+            if problem_with_canary and detection_regex:
+                prompts.append({
+                    "prompt": f"Solve this problem:\n\n{problem_with_canary}\n\nAnswer:",
+                    "puzzle_id": puzzle_id,
+                    "canary_type": canary_type,
+                    "detection_regex": detection_regex,
+                })
 
-            # Prompt without canary
-            problem_without_canary = row.get("problem_statement", "")
-            if problem_without_canary:
-                datapoints.append(ProbeDatapoint(
-                    prompt=f"Solve this problem:\n\n{problem_without_canary}\n\nAnswer:",
-                    label=0,
-                    puzzle_id=puzzle_id,
-                    canary_type=canary_type,
-                    condition="without_canary",
-                ))
+        return prompts
 
-        return datapoints
-
-    # Prepare data
-    probe_data = []
+    # Prepare prompts (labels assigned after generation)
+    puzzle_prompts = []
     if puzzles_df is not None and len(puzzles_df) > 0:
-        probe_data = prepare_probe_data(puzzles_df)
-    return (probe_data,)
+        puzzle_prompts = prepare_puzzle_prompts(puzzles_df)
+    return (puzzle_prompts,)
 
 
 @app.cell
-def _(mo, probe_data):
-    if probe_data:
-        n_with = sum(1 for d in probe_data if d.label == 1)
-        n_without = sum(1 for d in probe_data if d.label == 0)
-        mo.md(f"""
-    ### Prepared Probe Data
-    - **With canary**: {n_with} samples (label=1)
-    - **Without canary**: {n_without} samples (label=0)
-    - **Total**: {len(probe_data)} samples
-    """)
+def _(mo, puzzle_prompts):
+    _msg = ""
+    if puzzle_prompts:
+        _msg = f"""
+    ### Prepared Prompts
+    - **Total prompts**: {len(puzzle_prompts)}
+    - Labels will be assigned after generation based on whether the model's output contains the canary pattern.
+    """
     else:
-        mo.md("⚠️ No probe data prepared. Load puzzles first.")
+        _msg = "⚠️ No prompts prepared. Load puzzles first."
+    mo.md(_msg)
     return
 
 
 @app.cell
 def _(mo):
     mo.md(r"""
-    ## Collect Activations
+    ## Generate Completions & Collect Activations
 
-    Run prompts through the model and cache activations at each layer.
-    We collect the **last token** residual stream activations (pre-prediction position).
+    For each puzzle prompt:
+    1. Generate a completion from the model
+    2. Detect if the canary pattern appears in the OUTPUT
+    3. Collect activations at each layer
+    4. Label based on OUTPUT behavior (not input)
+
+    This is the **correct methodology** - we probe to predict what the model will DO,
+    not what the input contains.
     """)
     return
 
 
 @app.cell
 def _(mo):
-    collect_button = mo.ui.run_button(label="Collect Activations")
+    collect_button = mo.ui.run_button(label="Generate & Collect")
     layer_stride_input = mo.ui.dropdown(
         options=[1, 2, 4],
-        value=1,
-        label="Layer stride (collect every N layers)",
+        value=2,
+        label="Layer stride",
     )
-    mo.hstack([collect_button, layer_stride_input])
-    return collect_button, layer_stride_input
+    max_new_tokens_input = mo.ui.number(
+        value=50,
+        start=10,
+        stop=200,
+        step=10,
+        label="Max new tokens",
+    )
+    mo.hstack([collect_button, layer_stride_input, max_new_tokens_input])
+    return collect_button, layer_stride_input, max_new_tokens_input
 
 
 @app.cell
 def _(
+    ProbeDatapoint,
     collect_button,
     layer_stride_input,
+    max_new_tokens_input,
     mo,
     model,
     n_layers,
     np,
-    probe_data,
+    puzzle_prompts,
+    re,
     tl_utils,
     torch,
     tqdm,
@@ -320,46 +338,98 @@ def _(
     activations_by_layer = {}
     labels_array = None
     layer_indices = []
+    probe_data = []
+    _status = ""
 
-    if collect_button.value and probe_data:
+    if collect_button.value and puzzle_prompts:
         stride = int(layer_stride_input.value)
+        max_new_tokens = int(max_new_tokens_input.value)
         layer_indices = list(range(0, n_layers, stride))
 
         # Initialize storage
-        all_activations = {li: [] for li in layer_indices}
+        all_activations = {_li: [] for _li in layer_indices}
         all_labels = []
 
-        mo.md(f"Collecting activations at layers: {layer_indices}")
+        n_canary_used = 0
+        n_canary_not_used = 0
 
         with torch.no_grad():
-            for dp in tqdm(probe_data, desc="Collecting activations"):
-                # Tokenize
-                tokens = model.to_tokens(dp.prompt, prepend_bos=True)
+            for item in tqdm(puzzle_prompts, desc="Generating & collecting"):
+                prompt = item["prompt"]
+                detection_regex = item["detection_regex"]
 
-                # Run with cache
+                # Tokenize prompt
+                tokens = model.to_tokens(prompt, prepend_bos=True)
+                prompt_len = tokens.shape[1]
+
+                # Generate completion
+                output_tokens = model.generate(
+                    tokens,
+                    max_new_tokens=max_new_tokens,
+                    temperature=0.7,
+                    top_k=50,
+                    stop_at_eos=True,
+                    verbose=False,
+                )
+
+                # Decode completion (only the new tokens)
+                completion = model.to_string(output_tokens[0, prompt_len:])
+
+                # Detect canary in OUTPUT
+                try:
+                    pattern = re.compile(detection_regex, re.IGNORECASE)
+                    canary_in_output = bool(pattern.search(completion))
+                except re.error:
+                    canary_in_output = False
+
+                label = 1 if canary_in_output else 0
+                if canary_in_output:
+                    n_canary_used += 1
+                else:
+                    n_canary_not_used += 1
+
+                # Store datapoint
+                probe_data.append(ProbeDatapoint(
+                    prompt=prompt,
+                    completion=completion,
+                    label=label,
+                    puzzle_id=item["puzzle_id"],
+                    canary_type=item["canary_type"],
+                    detection_regex=detection_regex,
+                ))
+
+                # Now collect activations from the PROMPT processing
+                # (before generation, at the decision point)
                 _, cache = model.run_with_cache(tokens)
 
-                # Extract last-token residual stream at each layer
-                for li in layer_indices:
-                    act_name = tl_utils.get_act_name("resid_post", li)
-                    resid = cache[act_name]  # (batch, seq, d_model)
+                for _li in layer_indices:
+                    act_name = tl_utils.get_act_name("resid_post", _li)
+                    resid = cache[act_name]
                     last_token_act = resid[0, -1, :].cpu().numpy()
-                    all_activations[li].append(last_token_act)
+                    all_activations[_li].append(last_token_act)
 
-                all_labels.append(dp.label)
-
-                # Clear cache to save memory
+                all_labels.append(label)
                 del cache
 
         # Stack into arrays
         activations_by_layer = {
-            li: np.stack(acts, axis=0) for li, acts in all_activations.items()
+            _li: np.stack(acts, axis=0) for _li, acts in all_activations.items()
         }
         labels_array = np.array(all_labels)
 
-        mo.md(f"✅ Collected activations: shape per layer = {activations_by_layer[layer_indices[0]].shape}")
-    elif not probe_data:
-        mo.md("⚠️ No probe data available. Load puzzles first.")
+        _status = f"""✅ **Generation complete!**
+    - Canary USED in output: **{n_canary_used}** samples (label=1)
+    - Canary NOT used in output: **{n_canary_not_used}** samples (label=0)
+    - Activations shape: {activations_by_layer[layer_indices[0]].shape}
+
+    Now the probe will learn to predict OUTPUT behavior from activations.
+    """
+    elif not puzzle_prompts:
+        _status = "⚠️ No prompts available. Load puzzles first."
+    else:
+        _status = "Click 'Generate & Collect' to start."
+
+    mo.output.replace(mo.md(_status))
     return activations_by_layer, labels_array, layer_indices
 
 
@@ -368,8 +438,11 @@ def _(mo):
     mo.md(r"""
     ## Train Linear Probes
 
-    Train a logistic regression probe at each layer to classify
-    "canary present" vs "canary absent" based on activations.
+    Train a logistic regression probe at each layer to predict:
+    - **label=1**: Model will USE the canary in its output
+    - **label=0**: Model will NOT use the canary in its output
+
+    High accuracy means we can predict the model's output behavior from its activations.
     """)
     return
 
@@ -396,12 +469,11 @@ def _(
     train_test_split,
 ):
     probe_results = {}
+    _status = "Click 'Train Probes' to start."
 
     if train_button.value and activations_by_layer and labels_array is not None:
-        mo.md("Training probes at each layer...")
-
-        for li in layer_indices:
-            X = activations_by_layer[li]
+        for _li in layer_indices:
+            X = activations_by_layer[_li]
             y = labels_array
 
             # Train-test split
@@ -427,7 +499,7 @@ def _(
             lr = probe.named_steps["logisticregression"]
             weights = lr.coef_[0]
 
-            probe_results[li] = {
+            probe_results[_li] = {
                 "probe": probe,
                 "train_acc": train_acc,
                 "test_acc": test_acc,
@@ -437,9 +509,11 @@ def _(
                 "weight_norm": np.linalg.norm(weights),
             }
 
-        mo.md("✅ Trained probes at all layers")
+        _status = "✅ Trained probes at all layers"
     elif not activations_by_layer:
-        mo.md("⚠️ Collect activations first.")
+        _status = "⚠️ Collect activations first."
+
+    mo.output.replace(mo.md(_status))
     return (probe_results,)
 
 
@@ -456,25 +530,24 @@ def _(mo):
 
 @app.cell
 def _(layer_indices, mo, pd, probe_results):
+    _output = mo.md("Train probes to see results.")
     if probe_results:
         results_data = []
-        for li in layer_indices:
-            if li in probe_results:
-                r = probe_results[li]
+        for _li in layer_indices:
+            if _li in probe_results:
+                _r = probe_results[_li]
                 results_data.append({
-                    "Layer": li,
-                    "Train Acc": f"{r['train_acc']:.3f}",
-                    "Test Acc": f"{r['test_acc']:.3f}",
-                    "CV Mean": f"{r['cv_mean']:.3f}",
-                    "CV Std": f"{r['cv_std']:.3f}",
-                    "Weight Norm": f"{r['weight_norm']:.2f}",
+                    "Layer": _li,
+                    "Train Acc": f"{_r['train_acc']:.3f}",
+                    "Test Acc": f"{_r['test_acc']:.3f}",
+                    "CV Mean": f"{_r['cv_mean']:.3f}",
+                    "CV Std": f"{_r['cv_std']:.3f}",
+                    "Weight Norm": f"{_r['weight_norm']:.2f}",
                 })
 
         results_df = pd.DataFrame(results_data)
-        mo.md("### Probe Accuracy by Layer")
-        mo.ui.table(results_df)
-    else:
-        mo.md("Train probes to see results.")
+        _output = mo.vstack([mo.md("### Probe Accuracy by Layer"), mo.ui.table(results_df)])
+    mo.output.replace(_output)
     return
 
 
@@ -484,10 +557,10 @@ def _(layer_indices, probe_results):
 
     fig_acc = None
     if probe_results:
-        layers = [li for li in layer_indices if li in probe_results]
-        test_accs = [probe_results[li]["test_acc"] for li in layers]
-        cv_means = [probe_results[li]["cv_mean"] for li in layers]
-        cv_stds = [probe_results[li]["cv_std"] for li in layers]
+        layers = [_li for _li in layer_indices if _li in probe_results]
+        test_accs = [probe_results[_li]["test_acc"] for _li in layers]
+        cv_means = [probe_results[_li]["cv_mean"] for _li in layers]
+        cv_stds = [probe_results[_li]["cv_std"] for _li in layers]
 
         fig_acc, ax = plt.subplots(figsize=(10, 5))
 
@@ -515,9 +588,10 @@ def _(layer_indices, probe_results):
 
 @app.cell
 def _(fig_acc, mo):
+    _output = mo.md("")
     if fig_acc is not None:
-        mo.md("### Probe Accuracy Visualization")
-        fig_acc
+        _output = mo.vstack([mo.md("### Probe Accuracy Visualization"), fig_acc])
+    mo.output.replace(_output)
     return
 
 
@@ -533,22 +607,23 @@ def _(mo):
 
 @app.cell
 def _(layer_indices, mo, probe_results):
+    _output = mo.md("Train probes to see analysis.")
     if probe_results:
         # Find best layer
         best_layer = max(
-            [li for li in layer_indices if li in probe_results],
-            key=lambda li: probe_results[li]["test_acc"]
+            [_li for _li in layer_indices if _li in probe_results],
+            key=lambda _li: probe_results[_li]["test_acc"]
         )
         best_acc = probe_results[best_layer]["test_acc"]
 
         # Find where detection becomes reliable (>70% accuracy)
         reliable_layers = [
-            li for li in layer_indices 
-            if li in probe_results and probe_results[li]["test_acc"] > 0.7
+            _li for _li in layer_indices
+            if _li in probe_results and probe_results[_li]["test_acc"] > 0.7
         ]
         first_reliable = min(reliable_layers) if reliable_layers else None
 
-        mo.md(f"""
+        _output = mo.md(f"""
     ### Key Findings
 
     | Metric | Value |
@@ -564,6 +639,7 @@ def _(layer_indices, mo, probe_results):
     - Earlier layers detecting → the "decision" is made early in processing
     - Later layers detecting → the "decision" emerges during reasoning
     """)
+    mo.output.replace(_output)
     return
 
 
@@ -583,8 +659,8 @@ def _(layer_indices, plt, probe_results):
     fig_weights = None
     if probe_results:
         # Plot weight norms by layer
-        layers_w = [li for li in layer_indices if li in probe_results]
-        weight_norms = [probe_results[li]["weight_norm"] for li in layers_w]
+        layers_w = [_li for _li in layer_indices if _li in probe_results]
+        weight_norms = [probe_results[_li]["weight_norm"] for _li in layers_w]
 
         fig_weights, axes = plt.subplots(1, 2, figsize=(12, 4))
 
@@ -597,7 +673,7 @@ def _(layer_indices, plt, probe_results):
 
         # Weight distribution for best layer
         if probe_results:
-            best_layer_w = max(layers_w, key=lambda li: probe_results[li]["test_acc"])
+            best_layer_w = max(layers_w, key=lambda _li: probe_results[_li]["test_acc"])
             best_weights = probe_results[best_layer_w]["weights"]
             axes[1].hist(best_weights, bins=50, color="coral", edgecolor="black", alpha=0.7)
             axes[1].axvline(x=0, color="black", linestyle="--")
@@ -612,9 +688,10 @@ def _(layer_indices, plt, probe_results):
 
 @app.cell
 def _(fig_weights, mo):
+    _output = mo.md("")
     if fig_weights is not None:
-        mo.md("### Probe Weight Analysis")
-        fig_weights
+        _output = mo.vstack([mo.md("### Probe Weight Analysis"), fig_weights])
+    mo.output.replace(_output)
     return
 
 
@@ -655,15 +732,15 @@ def _(
 
         # Export summary as JSON
         summary = {}
-        for li in layer_indices:
-            if li in probe_results:
-                r = probe_results[li]
-                summary[str(li)] = {
-                    "train_acc": float(r["train_acc"]),
-                    "test_acc": float(r["test_acc"]),
-                    "cv_mean": float(r["cv_mean"]),
-                    "cv_std": float(r["cv_std"]),
-                    "weight_norm": float(r["weight_norm"]),
+        for _li in layer_indices:
+            if _li in probe_results:
+                _r = probe_results[_li]
+                summary[str(_li)] = {
+                    "train_acc": float(_r["train_acc"]),
+                    "test_acc": float(_r["test_acc"]),
+                    "cv_mean": float(_r["cv_mean"]),
+                    "cv_std": float(_r["cv_std"]),
+                    "weight_norm": float(_r["weight_norm"]),
                 }
 
         summary_path = export_base.with_suffix(".json")
@@ -673,18 +750,22 @@ def _(
         # Export weights as numpy
         weights_path = export_base.with_name(f"{export_base.name}_weights.npz")
         weights_dict = {
-            f"layer_{li}": probe_results[li]["weights"]
-            for li in layer_indices if li in probe_results
+            f"layer_{_li}": probe_results[_li]["weights"]
+            for _li in layer_indices if _li in probe_results
         }
         np.savez(weights_path, **weights_dict)
 
-        mo.md(f"""
+        _status = f"""
     ✅ **Exported results:**
     - Summary: `{summary_path}`
     - Weights: `{weights_path}`
-    """)
+    """
     elif export_button.value:
-        mo.md("⚠️ Train probes first before exporting.")
+        _status = "⚠️ Train probes first before exporting."
+    else:
+        _status = "Click 'Export Results' to save."
+
+    mo.output.replace(mo.md(_status))
     return
 
 

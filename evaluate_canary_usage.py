@@ -118,10 +118,12 @@ def _(Path, json, mo, pd, puzzles_path_input, rollouts_path_input):
     rollouts_path = Path(rollouts_path_input.value)
     puzzles_path = Path(puzzles_path_input.value)
 
+    status_messages = []
+
     if rollouts_path.exists():
         try:
             rollouts_df = pd.read_parquet(rollouts_path)
-            mo.md(f"✅ Loaded {len(rollouts_df)} rollouts from `{rollouts_path}`")
+            status_messages.append(mo.md(f"✅ Loaded {len(rollouts_df)} rollouts from `{rollouts_path}`"))
         except Exception as e:
             load_error = f"Error loading rollouts: {e}"
     else:
@@ -130,7 +132,7 @@ def _(Path, json, mo, pd, puzzles_path_input, rollouts_path_input):
     if puzzles_path.exists():
         try:
             puzzles_df = pd.read_parquet(puzzles_path)
-            mo.md(f"✅ Loaded {len(puzzles_df)} puzzles from `{puzzles_path}`")
+            status_messages.append(mo.md(f"✅ Loaded {len(puzzles_df)} puzzles from `{puzzles_path}`"))
         except Exception as e:
             load_error = f"Error loading puzzles: {e}"
     else:
@@ -140,10 +142,11 @@ def _(Path, json, mo, pd, puzzles_path_input, rollouts_path_input):
             with open(patterns_path) as patterns_file:
                 patterns_data = json.load(patterns_file)
             puzzles_df = pd.DataFrame(patterns_data)
-            mo.md(f"✅ Loaded {len(puzzles_df)} patterns from `{patterns_path}`")
+            status_messages.append(mo.md(f"✅ Loaded {len(puzzles_df)} patterns from `{patterns_path}`"))
 
     if load_error:
-        mo.md(f"⚠️ {load_error}")
+        status_messages.append(mo.md(f"⚠️ {load_error}"))
+    mo.vstack(status_messages)
     return puzzles_df, rollouts_df
 
 
@@ -224,11 +227,12 @@ def _(
         evaluation_results = evaluator.evaluate_batch(rollouts_list)
         evaluation_summary = compute_batch_summary(evaluation_results)
 
-        mo.md(f"✅ Evaluated {len(evaluation_results)} rollouts")
+        eval_status = mo.md(f"✅ Evaluated {len(evaluation_results)} rollouts")
     elif rollouts_df is None:
-        mo.md("⚠️ No rollouts loaded. Please load rollouts data first.")
+        eval_status = mo.md("⚠️ No rollouts loaded. Please load rollouts data first.")
     else:
-        mo.md("⚠️ No detectors configured. Please load puzzles data first.")
+        eval_status = mo.md("⚠️ No detectors configured. Please load puzzles data first.")
+    eval_status
     return evaluation_results, evaluation_summary
 
 
@@ -245,7 +249,7 @@ def _(mo):
 @app.cell
 def _(evaluation_summary, mo):
     if evaluation_summary is not None:
-        mo.md(f"""
+        _output = mo.md(f"""
     ### Overall Results
 
     | Metric | Value |
@@ -255,13 +259,15 @@ def _(evaluation_summary, mo):
     | **Detection Rate** | {evaluation_summary.canary_detection_rate:.1%} |
     """)
     else:
-        mo.md("Run evaluation to see results.")
+        _output = mo.md("Run evaluation to see results.")
+    _output
     return
 
 
 @app.cell
 def _(evaluation_summary, mo, pd):
     # Results by canary type
+    _output = None
     if evaluation_summary is not None and evaluation_summary.by_canary_type:
         type_data = []
         for ctype, stats in evaluation_summary.by_canary_type.items():
@@ -274,14 +280,15 @@ def _(evaluation_summary, mo, pd):
                 }
             )
         type_df = pd.DataFrame(type_data)
-        mo.md("### Results by Canary Type")
-        mo.ui.table(type_df)
+        _output = mo.vstack([mo.md("### Results by Canary Type"), mo.ui.table(type_df)])
+    _output
     return
 
 
 @app.cell
 def _(evaluation_summary, mo, pd):
     # Results by condition
+    _output = None
     if evaluation_summary is not None and evaluation_summary.by_condition:
         cond_data = []
         for cond, cstats in evaluation_summary.by_condition.items():
@@ -294,8 +301,8 @@ def _(evaluation_summary, mo, pd):
                 }
             )
         cond_df = pd.DataFrame(cond_data)
-        mo.md("### Results by Experimental Condition")
-        mo.ui.table(cond_df)
+        _output = mo.vstack([mo.md("### Results by Experimental Condition"), mo.ui.table(cond_df)])
+    _output
     return
 
 
@@ -329,10 +336,10 @@ def _(evaluation_results: "list[RolloutEvaluationResult]", mo, pd):
         available_cols = [c for c in display_cols if c in results_df.columns]
         display_df = results_df[available_cols]
 
-        mo.md("### Individual Rollout Results")
-        mo.ui.table(display_df.head(50))
+        _output = mo.vstack([mo.md("### Individual Rollout Results"), mo.ui.table(display_df.head(50))])
     else:
-        mo.md("No evaluation results yet. Run evaluation first.")
+        _output = mo.md("No evaluation results yet. Run evaluation first.")
+    _output
     return
 
 
@@ -380,9 +387,10 @@ def _(evaluation_summary):
 
 @app.cell
 def _(fig_type, mo):
+    _output = None
     if fig_type is not None:
-        mo.md("### Detection Rate by Canary Type")
-        fig_type
+        _output = mo.vstack([mo.md("### Detection Rate by Canary Type"), fig_type])
+    _output
     return
 
 
@@ -416,9 +424,10 @@ def _(evaluation_summary, plt):
 
 @app.cell
 def _(fig_cond, mo):
+    _output = None
     if fig_cond is not None:
-        mo.md("### Detection Rate by Condition")
-        fig_cond
+        _output = mo.vstack([mo.md("### Detection Rate by Condition"), fig_cond])
+    _output
     return
 
 
@@ -440,7 +449,8 @@ def _(
 ):
     from scipy import stats as scipy_stats
 
-    if evaluation_results and len(evaluation_summary.by_condition) >= 2:
+    _output = mo.md("Need at least 2 conditions with results to perform statistical analysis.")
+    if evaluation_results and evaluation_summary and hasattr(evaluation_summary, 'by_condition') and len(evaluation_summary.by_condition) >= 2:
         # Perform chi-square test between conditions
         conditions_list = list(evaluation_summary.by_condition.keys())
         observed = []
@@ -454,7 +464,7 @@ def _(
             chi2, p_value, dof, expected = scipy_stats.chi2_contingency(observed)
             significance = "significant" if p_value < 0.05 else "not significant"
 
-            mo.md(f"""
+            _output = mo.md(f"""
     ### Chi-Square Test: Detection Rate vs Condition
 
     | Statistic | Value |
@@ -467,8 +477,7 @@ def _(
     **Interpretation**: The difference in canary detection rates between conditions 
     is {significance} at the 0.05 significance level.
     """)
-    else:
-        mo.md("Need at least 2 conditions with results to perform statistical analysis.")
+    _output
     return
 
 
@@ -504,6 +513,7 @@ def _(
     mo,
     pd,
 ):
+    _output = None
     if export_button.value and evaluation_results:
         export_base = Path(export_path_input.value)
 
@@ -514,18 +524,20 @@ def _(
         results_export_df.to_parquet(parquet_path, index=False)
 
         # Export summary as JSON
+        summary_path = None
         if evaluation_summary is not None:
             summary_path = export_base.with_name(f"{export_base.name}_summary.json")
             with open(summary_path, "w") as summary_file:
                 json.dump(evaluation_summary.to_dict(), summary_file, indent=2)
 
-        mo.md(f"""
+        _output = mo.md(f"""
     ✅ **Exported results:**
     - Detailed results: `{parquet_path}`
     - Summary: `{summary_path}`
     """)
     elif export_button.value:
-        mo.md("⚠️ No results to export. Run evaluation first.")
+        _output = mo.md("⚠️ No results to export. Run evaluation first.")
+    _output
     return
 
 
@@ -556,6 +568,7 @@ def _(mo):
 
 @app.cell
 def _(CanaryDetector, mo, test_button, test_pattern_input, test_text_input):
+    _output = None
     if test_button.value:
         try:
             test_detector = CanaryDetector(
@@ -565,15 +578,16 @@ def _(CanaryDetector, mo, test_button, test_pattern_input, test_text_input):
             test_result = test_detector.detect(test_text_input.value)
 
             if test_result.detected:
-                mo.md(f"""
+                _output = mo.md(f"""
     ✅ **Canary Detected!**
     - Match: `{test_result.match}`
     - Position: {test_result.match_position}
     """)
             else:
-                mo.md("❌ **Canary NOT detected** in the text.")
+                _output = mo.md("❌ **Canary NOT detected** in the text.")
         except Exception as e:
-            mo.md(f"⚠️ Error: {e}")
+            _output = mo.md(f"⚠️ Error: {e}")
+    _output
     return
 
 
