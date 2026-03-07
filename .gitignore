@@ -1,0 +1,12 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+
+# Marimo local session state
+__marimo__/
+
+# Tool caches
+.ruff_cache/
+
+# macOS
+.DS_Store
